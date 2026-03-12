@@ -53,6 +53,12 @@ def main():
     input_type.add_argument('-quantachrome',
                             metavar='Quantachrome (.txt)',
                             action='store_true')
+    input_type.add_argument('-auto',
+                            metavar='Auto-detect (for .txt files)',
+                            action='store_true')
+    input_type.add_argument('-anton_paar',
+                            metavar='Anton Paar Autosorb 6300 XR (.txt)',
+                            action='store_true')
     input_type.add_argument('-belsorp-max',
                             metavar='BELSORP-max (.dat)',
                             action='store_true')
@@ -72,6 +78,10 @@ def main():
 
     if args.quantachrome:
         filetype = 'quantachrome'
+    elif args.auto:
+        filetype = 'auto'
+    elif args.anton_paar:
+        filetype = 'anton_paar'
     elif args.belsorp_max:
         filetype = 'BELSORP-max'
     elif args.belsorp_csv:

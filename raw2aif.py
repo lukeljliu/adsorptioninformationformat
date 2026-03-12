@@ -11,6 +11,7 @@ from adsorption_file_parser import read as afp_read
 from gemmi import cif  # pylint: disable-msg=no-name-in-module
 
 from parsers import NISTjson, aif_data_standardise
+from parsers.anton_paar import parse as anton_paar_parse
 
 
 def quoted(text):
@@ -18,9 +19,54 @@ def quoted(text):
     return "'" + text + "'"
 
 
+def detect_filetype(filename):
+    """
+    Auto-detect file type for Quantachrome/Anton Paar text files.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the file.
+
+    Returns
+    -------
+    str
+        Detected filetype: 'quantachrome', 'anton_paar', or None if unknown.
+    """
+    with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
+        # 读取前20行来分析文件格式
+        lines = [f.readline() for _ in range(20) if f]
+
+    # 检查是否包含 Quantachrome ASiQwin 版权标识
+    content = ''.join(lines)
+    if 'asiqwin' in content.lower() or 'quantachrome' in content.lower():
+        return 'quantachrome'
+
+    # 检查 Anton Paar 特征
+    # 1. 包含 "Autosorb" 关键词
+    # 2. 元数据格式是多空格分隔（而非冒号）
+    for line in lines:
+        if 'autosorb' in line.lower():
+            return 'anton_paar'
+        # 检查是否有 "Sample ID  xxx" 格式（双空格分隔）
+        if 'sample id' in line.lower() and '  ' in line and ':' not in line:
+            return 'anton_paar'
+
+    return None
+
+
 # parse input file
 def parse(filetype, filename):
     """Fork to correct parser"""
+
+    # 自动检测文件类型
+    if filetype == 'auto':
+        detected = detect_filetype(filename)
+        if detected:
+            filetype = detected
+            print(f"Auto-detected file type: {filetype}")
+        else:
+            raise ValueError('Could not auto-detect file type. Please specify the file type.')
     if filetype == 'BELSORP-max':
         meta, data = afp_read(path=filename, manufacturer='bel', fmt='dat')
     elif filetype == 'BEL-csv':
@@ -31,6 +77,11 @@ def parse(filetype, filename):
         meta, data = afp_read(path=filename, manufacturer='bel', fmt='xl')
     elif filetype == 'quantachrome':
         meta, data = afp_read(path=filename, manufacturer='qnt', fmt='txt-raw')
+    elif filetype == 'anton_paar':
+        meta, ads, des = anton_paar_parse(filename)
+        # 返回元数据、吸附数据、脱附数据
+        # 直接返回，不经过 aif_data_standardise
+        return (meta, ads, des)
     elif filetype == 'micromeritics':
         meta, data = afp_read(path=filename, manufacturer='mic', fmt='xl')
     elif filetype == 'SMS DVS':
@@ -77,6 +128,16 @@ def makeAIF(data_meta, data_ads, data_des, material_id, filename):
     block.set_pair('_units_temperature', quoted(data_meta['temperature_unit']))
     block.set_pair('_units_pressure', quoted(data_meta['pressure_unit']))
     block.set_pair('_units_mass', quoted(data_meta['material_unit']))
+
+    # Use loading_mass (per gram) if available, otherwise use loading
+    if 'loading_mass' in data_ads.columns:
+        loading_ads = data_ads['loading_mass']
+        loading_des = data_des['loading_mass'] if len(data_des) > 0 else data_des['loading_mass'] if 'loading_mass' in data_des.columns else data_des['loading']
+        data_meta['loading_unit'] = 'cm³ STP/g'
+    else:
+        loading_ads = data_ads['loading']
+        loading_des = data_des['loading'] if len(data_des) > 0 else None
+
     block.set_pair('_units_loading', quoted(data_meta['loading_unit']))
     block.set_pair('_audit_aif_version', 'd546195')
 
@@ -89,16 +150,16 @@ def makeAIF(data_meta, data_ads, data_des, material_id, filename):
         loop_ads.set_all_values([
             list(data_ads['pressure'].astype(str)),
             list(data_ads['pressure_saturation'].astype(str)),
-            list(data_ads['loading'].astype(str))
+            list(loading_ads.astype(str))
         ])
 
         # write desorption data
-        if len(data_des > 0):
+        if len(data_des) > 0:
             loop_des = block.init_loop('_desorp_', ['pressure', 'p0', 'amount'])
             loop_des.set_all_values([
                 list(data_des['pressure'].astype(str)),
                 list(data_des['pressure_saturation'].astype(str)),
-                list(data_des['loading'].astype(str))
+                list(loading_des.astype(str))
             ])
 
     # warning: this branch can never be reached
@@ -108,15 +169,15 @@ def makeAIF(data_meta, data_ads, data_des, material_id, filename):
         loop_ads = block.init_loop('_adsorp_', ['pressure', 'amount'])
         loop_ads.set_all_values([
             list(data_ads['pressure'].astype(str)),
-            list(data_ads['loading'].astype(str))
+            list(loading_ads.astype(str))
         ])
 
         # write desorption data
-        if len(data_des > 0):
+        if len(data_des) > 0:
             loop_des = block.init_loop('_desorp_', ['pressure', 'amount'])
             loop_des.set_all_values([
                 list(data_des['pressure'].astype(str)),
-                list(data_des['loading'].astype(str))
+                list(loading_des.astype(str))
             ])
 
     elif 'pressure_saturation' not in data_ads and 'pressure_relative' in data_ads:
@@ -126,18 +187,18 @@ def makeAIF(data_meta, data_ads, data_des, material_id, filename):
         loop_ads.set_all_values([
             list(data_ads['pressure'].astype(str)),
             list(data_ads['pressure_saturation'].astype(str)),
-            list(data_ads['loading'].astype(str))
+            list(loading_ads.astype(str))
         ])
 
         # write desorption data
-        if len(data_des > 0):
+        if len(data_des) > 0:
             data_des['pressure_saturation'] = (1 /
                                                data_des['pressure_relative']) * data_des['pressure']
             loop_des = block.init_loop('_desorp_', ['pressure', 'p0', 'amount'])
             loop_des.set_all_values([
                 list(data_des['pressure'].astype(str)),
                 list(data_des['pressure_saturation'].astype(str)),
-                list(data_des['loading'].astype(str))
+                list(loading_des.astype(str))
             ])
 
     else:
@@ -145,15 +206,15 @@ def makeAIF(data_meta, data_ads, data_des, material_id, filename):
         loop_ads = block.init_loop('_adsorp_', ['pressure', 'amount'])
         loop_ads.set_all_values([
             list(data_ads['pressure'].astype(str)),
-            list(data_ads['loading'].astype(str))
+            list(loading_ads.astype(str))
         ])
 
         # write desorption data
-        if len(data_des > 0):
+        if len(data_des) > 0:
             loop_des = block.init_loop('_desorp_', ['pressure', 'amount'])
             loop_des.set_all_values([
                 list(data_des['pressure'].astype(str)),
-                list(data_des['loading'].astype(str))
+                list(loading_des.astype(str))
             ])
 
     outputfilename = os.path.splitext(filename)[0] + '.aif'
